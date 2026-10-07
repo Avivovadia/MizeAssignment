@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using SupplierFeed.Api.Data;
 using SupplierFeed.Api.Domain;
+using SupplierFeed.Api.Services;
 using SupplierFeed.Tests.Support;
 
 namespace SupplierFeed.Tests;
@@ -70,6 +71,14 @@ public class AppStartupTests
 
         Assert.That(policy.Check(now + 60_000, now), Is.Null);
         Assert.That(policy.Check(now + 60_001, now), Is.Not.Null);
+    }
+
+    [Test]
+    public void Ingest_orchestrator_is_wired_with_all_of_its_dependencies()
+    {
+        var orchestrator = _factory.Services.GetRequiredService<IngestOrchestrator>();
+
+        Assert.That(orchestrator.Ingest("not json"), Is.InstanceOf<IngestResult.Unattributable>());
     }
 
     [Test]

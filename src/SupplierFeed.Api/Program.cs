@@ -1,5 +1,6 @@
 using SupplierFeed.Api.Data;
 using SupplierFeed.Api.Domain;
+using SupplierFeed.Api.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -12,6 +13,7 @@ builder.Services.AddSingleton(new ThrottleStore(throttleOptions)); // validates 
 builder.Services.AddSingleton<ReservationStore>();
 builder.Services.AddSingleton<StatsStore>();
 builder.Services.AddSingleton(new UpdatedAtPolicy(updatedAtOptions)); // validates the options at startup
+builder.Services.AddSingleton<IngestOrchestrator>();
 builder.Services.AddControllers();
 
 var app = builder.Build();

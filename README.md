@@ -10,7 +10,7 @@ ASP.NET Core 8+ Web API + SQLite + Dapper. Dedupes supplier reservation updates 
 - **Identity** is `(supplierId, reservationId)`; `updatedAtUtc` is the version. An older version with different details is ignored as `outofdate`.
 - **Throttle runs before validation**; every attributable request counts, throttled ones don't occupy the window.
 - **One transaction per request**, owned by the orchestrator: the throttle slot, reservation write and stats counter commit together, so stats can't drift after a crash. The apply step runs in a savepoint so a failing request still consumes its quota slot.
-- **Responses and stats share one vocabulary:** `ingested` (created/updated), `ignored` (duplicate/outofdate), `invalid` (400), `throttled` (429 + `Retry-After`). The counters add up to a supplier's total traffic; invalid requests count toward the limit but never touch `reservations`.
+- **Responses and stats share one vocabulary:** `ingested` (created/updated), `ignored` (duplicate/outofdate), `invalid` (400), `throttled` (429 + `Retry-After`). `invalid` counts every bad payload even when the request is also throttled (so a supplier sending garbage stays visible during a flood); invalid requests count toward the limit but never touch `reservations`.
 
 ## Where I disagreed with / changed Claude Code's suggestions
 - Claude proposed per-instance clocks with accepted skew. Rejected: it breaks the single-source-of-truth and exact-limit assumptions. Switched to DB-stamped time.

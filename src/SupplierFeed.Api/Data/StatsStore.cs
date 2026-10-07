@@ -32,16 +32,12 @@ public sealed class StatsStore
     /// <summary>A reservation was applied: created and updated are ingested, duplicate and out of date are ignored.</summary>
     public void Record(IDbConnection connection, IDbTransaction transaction, string supplierId, IngestDetail detail)
     {
-        var sql = detail switch
-        {
-            IngestDetail.Created or IngestDetail.Updated => IncrementIngestedSql,
-            IngestDetail.Duplicate or IngestDetail.OutOfDate => IncrementIgnoredSql,
-            _ => throw new ArgumentOutOfRangeException(nameof(detail), detail, "No counter is defined for this outcome."),
-        };
+        // ToStatus is the single created/updated -> ingested, duplicate/outofdate -> ignored rule (and rejects unknown values).
+        var sql = detail.ToStatus() == IngestStatus.Ingested ? IncrementIngestedSql : IncrementIgnoredSql;
         connection.Execute(sql, new { supplierId }, transaction);
     }
 
-    /// <summary>A request was admitted but its payload was rejected.</summary>
+    /// <summary>A request's payload was rejected, whether or not the rate limit also rejected it.</summary>
     public void Record(IDbConnection connection, IDbTransaction transaction, string supplierId, IngestParseResult.Invalid invalid) =>
         connection.Execute(IncrementInvalidSql, new { supplierId }, transaction);
 
