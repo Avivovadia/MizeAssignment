@@ -56,7 +56,7 @@ Notes:
 - Reservation upsert: unique index on `(supplierId, reservationId)`; conditional `UPDATE ... WHERE updatedAtUtc <= @new AND details differ`, so concurrent writers can't regress data.
 - Throttle admit and reservation upsert are separate transactions (a crash between burns a quota slot; accepted).
 - `Retry-After` comes from the oldest row in the window.
-- Use `BEGIN IMMEDIATE` + `busy_timeout` to avoid `SQLITE_BUSY` between instances. Verify the bundled SQLite supports ms precision (`unixepoch('subsec')`, 3.42+).
+- Avoid `SQLITE_BUSY` between instances with immediate transactions, WAL, and a finite `Default Timeout` (see "SQLite facts" below).
 - Cleanup: a `BackgroundService` per instance, roughly once a minute, runs one global `DELETE FROM request_log WHERE tsMs <= now - 60000` (DB clock). Not per request: a per-request delete adds lock time to SQLite's single writer and is redundant across instances. Correctness never depends on it (the count query only reads in-window rows via the `(supplierId, tsMs)` index, so old rows don't slow it). Idempotent, so overlapping instances are harmless. No TTL option exists on SQLite (no row expiry, no event scheduler; a trigger would just be per-insert cost inside the DB), so the in-service job is a compromise; the preferred design is a single external cleaner (cron job / DB-side scheduler) — see README. Also cleans rows from quiet/spoofed suppliers. Table stays ~100-200 rows per supplier.
 
 ## Assumptions
@@ -90,8 +90,35 @@ Notes:
 - Concurrency: parallel requests on separate connections never admit more than 100; concurrent same-reservation writes end consistent.
 - Stats counters match outcomes. Validation 400 cases including far-future `updatedAtUtc`.
 
+## SQLite facts (chunk 0 results)
+Measured with a throwaway console app (outside the repo, discarded) on `Microsoft.Data.Sqlite 8.0.31` + `Dapper 2.1.89`, bundled SQLite **3.53.3** (`SQLitePCLRaw.bundle_e_sqlite3 2.1.12`).
+1. **Millisecond time works.** `unixepoch('subsec')` is available; `cast(unixepoch('subsec')*1000 as integer)` gives ms. `julianday` also works but isn't needed. The window design stands.
+2. **`BeginTransaction()` is already immediate.** With 100 concurrent read-sleep-write transactions on separate connections under WAL: default `BeginTransaction()` -> 0 errors, no lost updates; raw `BEGIN IMMEDIATE` -> 0 errors; `BeginTransaction(deferred: true)` -> 8/100 failed with `SQLite Error 5: database is locked`. So the risk I raised is real, but only for explicit deferred transactions. Use the default `BeginTransaction()`; no raw `BEGIN IMMEDIATE` needed. (Corrects my earlier assumption that it defaulted to deferred.)
+3. **Waiting on locks is controlled by `Default Timeout` (seconds, the command timeout), not by `PRAGMA busy_timeout`** (which reads 0; the provider retries itself). A writer blocked by a held lock failed after ~1.1s with `Default Timeout=1` and waited ~1.6s then succeeded with `30`. `Default Timeout=0` means no limit (waited indefinitely), so set an explicit finite value (e.g. 5-30s).
+4. **WAL:** `PRAGMA journal_mode=WAL` persists in the DB file only once the file has been written (setting it on an empty new file reverted to `delete`). Set it in the same init step that creates the schema.
+5. **The atomic admit holds under contention:** 150 admit statements from 8 threads, each on its own connection, against one file: exactly 100 admitted, 50 rejected, 0 errors, 100 rows in the log — both as a single autocommit statement and inside an explicit transaction.
+6. **Not covered:** separate OS processes (same file-lock mechanism, so expected to behave the same), the throttled-counter increment, and the reservation upsert; those are tested in chunks 4, 5 and 8.
+
+## Implementation chunks
+Each chunk is small, test-first (TDD), ends green, and is committed on its own. Starting point: the untracked IDE template (`SupplierFeed.sln`, `src/SupplierFeed.Api`, `tests/SupplierFeed.Tests`; controllers-based Web API, tests csproj is empty).
+
+| # | Chunk | Scope | Done when |
+|---|---|---|---|
+| 0 | **Spike: SQLite facts** (throwaway) — **DONE, see "SQLite facts"** | Confirm the bundled SQLite supports `unixepoch('subsec')` (3.42+); how to get `BEGIN IMMEDIATE` with `Microsoft.Data.Sqlite` + Dapper; WAL + `busy_timeout`; DB path/connection config shared by several connections. Record findings in plan.md. | Questions answered; any spike code discarded. If ms time is unavailable, revisit the window design before going on. |
+| 1 | **Project setup** — **DONE (awaiting acceptance)** | Add Dapper, Microsoft.Data.Sqlite, **NUnit** + `Microsoft.AspNetCore.Mvc.Testing`; project reference tests -> api; strip template leftovers (Swagger, weather sample, HTTPS redirect, auth, IIS launch profile); `public partial class Program` for `WebApplicationFactory`. Folders (`Api`, `Domain`, `Data`) are created by the chunks that add files, not as empty placeholders. | `dotnet build` passes and a smoke test (app starts, unknown route -> 404) passes. |
+| 2 | **Schema + connection factory** | `reservations` (unique `(supplierId, reservationId)`), `request_log` (+ index `(supplierId, tsMs)`), `supplier_stats`; idempotent init on startup; connection factory with the settings from chunk 0. | Tests: schema created twice without error; unique constraint enforced. |
+| 3 | **Validation + models** (pure, no DB) | Request/response DTOs; payload validation (required fields, `checkOut > checkIn`, `price >= 0`, UTC normalization); outcome enums matching stats vocabulary. | Unit tests for every 400 case. |
+| 4 | **Throttle store** | Atomic admit/reject (DB-stamped time), `Retry-After`, `throttled` counter, per-supplier isolation. | Tests with backdated `request_log` rows: 100 admitted, 101st rejected; rejected requests don't extend window; release when rows age out; supplier A doesn't affect B. |
+| 5 | **Reservation store** | Upsert + classification: created / updated / duplicate (same, newer-bump, older) / outofdate; far-future `updatedAtUtc` check against DB time; `ingested` / `ignored` counters in the same transaction. | One test per row of the request-types table in this file. |
+| 6 | **Ingest endpoint** | Orchestrate parse -> throttle -> validate -> apply; HTTP mapping (201/200/400/429/500). **Trap:** `[ApiController]` auto-400 and model binding run before our code, which would skip the throttle and miss unattributable-request handling, so bind the raw body manually (or disable automatic model-state 400) and read `supplierId` first. | HTTP-level tests through `WebApplicationFactory` for every outcome and status code. |
+| 7 | **Stats endpoint** | `GET /api/reservations/stats/{supplierId}` returns `{supplierId, ingested, ignored, throttled}`; zeros for unknown supplier. | Stats match outcomes after a mixed sequence of requests. |
+| 8 | **Concurrency tests** | Parallel requests on separate connections (and separate app instances against one DB file): exactly 100 admitted out of 150; concurrent same-reservation writes end consistent; no `SQLITE_BUSY` surfacing as 500. | Tests pass repeatedly (run several times to catch flakiness). |
+| 9 | **Cleanup job** | `BackgroundService` doing the global `DELETE ... tsMs <= now - 60000` about every minute; configurable interval. | Test: deletes only out-of-window rows and never changes a throttle decision. |
+| 10 | **Wrap-up** | Final README trim (half page), run instructions, review diff against this plan, unedited transcript export. | Checklist in the README's three sections complete; all tests green. |
+
+Order notes: 3 can be done before or after 2; 4 and 5 are independent of each other once 2 exists; 6 needs 3, 4 and 5; 8 and 9 come last because they build on the finished path.
+
 ## Next steps
-1. Written spec from this plan; user review.
-2. Implementation plan (`writing-plans`).
-3. TDD implementation.
-4. Keep README short; final transcript export unedited.
+1. Review/adjust the chunks above.
+2. Written spec review, then start chunk 0.
+3. Keep README short; final transcript export unedited.
