@@ -33,10 +33,10 @@ public class IngestResponseJsonTests
     }
 
     [Test]
-    public void Error_response_lists_the_errors()
+    public void Error_response_uses_the_invalid_status_and_lists_the_errors()
     {
         var json = Serialize(new ErrorResponse(new[] { "price must be >= 0" }));
 
-        Assert.That(json, Is.EqualTo("{\"errors\":[\"price must be >= 0\"]}"));
+        Assert.That(json, Is.EqualTo("{\"status\":\"invalid\",\"errors\":[\"price must be >= 0\"]}"));
     }
 }

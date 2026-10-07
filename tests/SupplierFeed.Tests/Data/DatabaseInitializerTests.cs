@@ -88,10 +88,11 @@ public class DatabaseInitializerTests
         using var conn = _db.Factory.Open();
         conn.Execute("insert into supplier_stats (supplierId) values ('s1')");
 
-        var row = conn.QuerySingle("select ingested, ignored, throttled from supplier_stats where supplierId = 's1'");
+        var row = conn.QuerySingle("select ingested, ignored, invalid, throttled from supplier_stats where supplierId = 's1'");
 
         Assert.That((long)row.ingested, Is.Zero);
         Assert.That((long)row.ignored, Is.Zero);
+        Assert.That((long)row.invalid, Is.Zero);
         Assert.That((long)row.throttled, Is.Zero);
     }
 }

@@ -29,6 +29,7 @@ public static class DatabaseInitializer
             supplierId text    primary key,
             ingested   integer not null default 0,
             ignored    integer not null default 0,
+            invalid    integer not null default 0,
             throttled  integer not null default 0
         );";
 

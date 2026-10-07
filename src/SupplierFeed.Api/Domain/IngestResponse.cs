@@ -4,11 +4,12 @@ using System.Text.Json.Serialization;
 
 namespace SupplierFeed.Api.Domain;
 
-/// <summary>Same vocabulary as the stats counters; 'invalid' (400) is not a counter.</summary>
+/// <summary>Same vocabulary as the stats counters.</summary>
 public enum IngestStatus
 {
     Ingested,
     Ignored,
+    Invalid,
     Throttled,
 }
 
@@ -22,7 +23,11 @@ public enum IngestDetail
 
 public sealed record IngestResponse(IngestStatus Status, IngestDetail? Detail = null, int? RetryAfterSeconds = null);
 
-public sealed record ErrorResponse(IReadOnlyList<string> Errors);
+public sealed record ErrorResponse(IReadOnlyList<string> Errors)
+{
+    [JsonPropertyOrder(-1)]
+    public IngestStatus Status => IngestStatus.Invalid;
+}
 
 /// <summary>JSON settings for API responses: camelCase properties, lowercase enum words ("outofdate").</summary>
 public static class IngestJson

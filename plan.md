@@ -14,11 +14,10 @@ Must be correct across multiple server instances. See `candidate-brief.txt` for 
 - Tests control time by inserting backdated `request_log` rows (no sleeping, no fake clock).
 
 ## Processing order for every ingest request
-1. Parse body. No usable `supplierId` (malformed JSON, missing field) -> 400, nothing counted.
-2. Throttle: atomic admit/reject (see Concurrency).
-3. Validate payload.
-4. Reject far-future `updatedAtUtc`.
-5. Upsert reservation and classify the outcome.
+1. **Parse and validate (pure, in memory, no DB):** `IngestParser.Parse` reads the `supplierId` and validates the payload in one pass. Result: Unattributable (no usable `supplierId`: 400, nothing counted, no DB access), Invalid(supplierId), or Valid.
+2. **Throttle (DB):** atomic admit/reject for Invalid and Valid requests. Rejected -> 429, `throttled`+1, even if the payload was invalid (it was never admitted).
+3. **If admitted and Invalid:** 400, `invalid`+1, written in the same transaction as the admit (the verdict is already known), so no second transaction.
+4. **If admitted and Valid:** far-future `updatedAtUtc` check against DB time (400, `invalid`+1 if it fails), then upsert the reservation and classify the outcome.
 
 ## Request types
 
@@ -31,22 +30,23 @@ Must be correct across multiple server instances. See `candidate-brief.txt` for 
 | Duplicate, older version | Identical details, older `updatedAtUtc` | 200 `{status:"ignored", detail:"duplicate"}` | Yes | `ignored` | None |
 | Out of date | Details differ, incoming `updatedAtUtc` older than stored | 200 `{status:"ignored", detail:"outofdate"}`, stored data kept | Yes | `ignored` | None |
 | Throttled | 100 admitted requests already in last 60s | 429 + `Retry-After`, `{status:"throttled", retryAfterSeconds}` | **No** | `throttled` | Counter only |
-| Invalid | Missing field, `checkOut <= checkIn`, `price < 0`, `updatedAtUtc` > DB now + ~5 min | 400 with message | Yes | none | None |
+| Invalid | Missing field, `checkOut <= checkIn`, `price < 0`, `updatedAtUtc` > DB now + ~5 min | 400 `{status:"invalid", errors:[...]}` | Yes | `invalid` | `request_log` row + counter only; never `reservations` |
 | Unattributable | Malformed JSON / no usable `supplierId` | 400 | No | none | None |
-| Server error | Unexpected failure after admission | 500 | Yes (slot burnt) | none | None |
+| Server error | Unexpected failure after admission (apply step throws) | 500 | Yes (slot burnt, kept by the savepoint) | none | `request_log` row only; the apply step is rolled back |
 
 Notes:
 - Equal `updatedAtUtc` with different details is an update, not out of date.
 - Response `status` uses the same vocabulary as the stats counters. `detail` is explanatory only and is not counted.
 - Throttled requests don't occupy the window, so a supplier is released as soon as old rows age out.
-- Invalid requests consume quota because throttling runs before validation.
+- Invalid requests consume quota: the throttle runs on every attributable request, and the invalid verdict is only acted on after admission. Their `request_log` row is the rate-limit record; nothing is written to `reservations`.
 
 ## Stats
-`GET /api/reservations/stats/{supplierId}` -> `{supplierId, ingested, ignored, throttled}`, lifetime counters.
+`GET /api/reservations/stats/{supplierId}` -> `{supplierId, ingested, ignored, invalid, throttled}`, lifetime counters.
 - `ingested` = created + updated (data written).
 - `ignored` = duplicates + out of date (accepted, nothing applied).
+- `invalid` = admitted requests rejected with 400 (bad payload or far-future `updatedAtUtc`).
 - `throttled` = 429s.
-- They partition all attributable, valid requests. Invalid (400) requests are in no counter.
+- They partition every attributable request, so the four counters add up to the supplier's total traffic. Unattributable requests (no `supplierId`) are in no counter.
 - Unknown supplier -> 200 with zeros.
 
 ## Concurrency design
@@ -54,14 +54,15 @@ Notes:
 - Atomic check-and-insert in one statement: `INSERT ... SELECT ... WHERE (count in window) < 100`. 0 rows affected -> throttled. The DB stamps the time in the same statement; the app never supplies "now".
 - Throttled -> increment the supplier's throttled counter in the same transaction (`INSERT ... ON CONFLICT DO UPDATE`).
 - Reservation upsert: unique index on `(supplierId, reservationId)`; conditional `UPDATE ... WHERE updatedAtUtc <= @new AND details differ`, so concurrent writers can't regress data.
-- Throttle admit and reservation upsert are separate transactions (a crash between burns a quota slot; accepted).
+- **One transaction per request, owned by the orchestrator** (chosen over separate transactions per step): the admit row, the reservation write and the stats counter commit or roll back together, so stats can't drift after a crash, and the writer lock is taken once. The apply step runs inside a `SAVEPOINT`: if it throws, roll back to the savepoint and commit the admit row, so a failing request still consumes its quota slot (otherwise a persistent failure would let a supplier retry unthrottled) and returns 500. Stores take the connection and transaction as arguments and never open their own.
+- Trade-offs accepted: throttle SQL is coupled to the DB transaction (a Redis window store could not join it, so it would be split out behind an interface then); SQL Server needs `SAVE TRANSACTION` instead of `SAVEPOINT`; lock-hold time per request is slightly longer (unmeasured).
 - `Retry-After` comes from the oldest row in the window.
 - Avoid `SQLITE_BUSY` between instances with immediate transactions, WAL, and a finite `Default Timeout` (see "SQLite facts" below).
 - Cleanup: a `BackgroundService` per instance, roughly once a minute, runs one global `DELETE FROM request_log WHERE tsMs <= now - 60000` (DB clock). Not per request: a per-request delete adds lock time to SQLite's single writer and is redundant across instances. Correctness never depends on it (the count query only reads in-window rows via the `(supplierId, tsMs)` index, so old rows don't slow it). Idempotent, so overlapping instances are harmless. No TTL option exists on SQLite (no row expiry, no event scheduler; a trigger would just be per-insert cost inside the DB), so the in-service job is a compromise; the preferred design is a single external cleaner (cron job / DB-side scheduler) — see README. Also cleans rows from quiet/spoofed suppliers. Table stays ~100-200 rows per supplier.
 
 ## Assumptions
 1. Supplier identity is the `supplierId` in the body (no auth).
-2. Throttle check runs before validation; invalid attributable payloads count toward the limit.
+2. The throttle runs on every attributable request, after the pure parse/validate step and before any consequence of validity is applied; invalid attributable payloads count toward the limit and have their own `invalid` counter.
 3. Validation: required fields, `checkOut > checkIn`, `price >= 0`; timestamps normalized to UTC. No room-overlap/double-booking checks.
 4. Price stored with exact decimal semantics (integer minor units or normalized text; decide at implementation).
 5. Stats are lifetime, not windowed.
@@ -108,15 +109,15 @@ Each chunk is small, test-first (TDD), ends green, and is committed on its own. 
 | 1 | **Project setup** — **DONE (awaiting acceptance)** | Add Dapper, Microsoft.Data.Sqlite, **NUnit** + `Microsoft.AspNetCore.Mvc.Testing`; project reference tests -> api; strip template leftovers (Swagger, weather sample, HTTPS redirect, auth, IIS launch profile); `public partial class Program` for `WebApplicationFactory`. Folders (`Api`, `Domain`, `Data`) are created by the chunks that add files, not as empty placeholders. | `dotnet build` passes and a smoke test (app starts, unknown route -> 404) passes. |
 | 2 | **Schema + connection factory** — **DONE (awaiting acceptance)**. Decisions: timestamps are integer ms (UTC); `price` is a `TEXT` column holding an exact `decimal` (compared as `decimal` in C#, never in SQL; a `NUMERIC` column would turn it into a float, guarded by a test); later, on a server DB, this can become a native decimal column. | `reservations` (unique `(supplierId, reservationId)`), `request_log` (+ index `(supplierId, tsMs)`), `supplier_stats`; idempotent init on startup; connection factory with the settings from chunk 0. | Tests: schema created twice without error; unique constraint enforced. |
 | 3 | **Validation + models** (pure, no DB) — **DONE (awaiting acceptance)**. Two-stage parse (`IngestParser`): tolerant `supplierId` read first (Unattributable / Invalid / Valid), then strict fields; property names case-insensitive; timestamps ISO 8601 only, offset-less = UTC (`AssumeUniversal`), stored as UTC ms; `supplierId` compared exactly; responses serialize lowercase (`outofdate`) via `IngestJson.Options`. | Request/response DTOs; payload validation (required fields, `checkOut > checkIn`, `price >= 0`, UTC normalization); outcome enums matching stats vocabulary. | Unit tests for every 400 case. |
-| 4 | **Throttle store** | Atomic admit/reject (DB-stamped time), `Retry-After`, `throttled` counter, per-supplier isolation. | Tests with backdated `request_log` rows: 100 admitted, 101st rejected; rejected requests don't extend window; release when rows age out; supplier A doesn't affect B. |
-| 5 | **Reservation store** | Upsert + classification: created / updated / duplicate (same, newer-bump, older) / outofdate; far-future `updatedAtUtc` check against DB time; `ingested` / `ignored` counters in the same transaction. | One test per row of the request-types table in this file. |
-| 6 | **Ingest endpoint** | Orchestrate parse -> throttle -> validate -> apply; HTTP mapping (201/200/400/429/500). **Trap:** `[ApiController]` auto-400 and model binding run before our code, which would skip the throttle and miss unattributable-request handling, so bind the raw body manually (or disable automatic model-state 400) and read `supplierId` first. | HTTP-level tests through `WebApplicationFactory` for every outcome and status code. |
-| 7 | **Stats endpoint** | `GET /api/reservations/stats/{supplierId}` returns `{supplierId, ingested, ignored, throttled}`; zeros for unknown supplier. | Stats match outcomes after a mixed sequence of requests. |
+| 4 | **Throttle store** (pure: knows nothing about validity, stats or reservations) | `TryAdmit(connection, transaction, supplierId)` -> `Admitted` or `Throttled(retryAfterSeconds)`; atomic insert with DB-stamped time; `Retry-After` from the oldest in-window row; limit and window from `ThrottleOptions` (config, defaults 100 / 60s). Does not touch stats. | Tests with backdated `request_log` rows: 100 admitted, 101st rejected; rejected requests add no row; release when rows age out; per-supplier isolation; custom limit honored; 150 parallel admits (own connections) give exactly 100. |
+| 5 | **Reservation store + DB clock** | `Apply(connection, transaction, ValidatedIngest)` -> created / updated / duplicate (same, newer-bump, older) / outofdate; a DB-time helper for the far-future `updatedAtUtc` check. Does not touch stats. | One test per row of the request-types table in this file. |
+| 6 | **Stats store + ingest orchestrator** (service, no HTTP) | `StatsStore` increments `ingested` / `ignored` / `invalid` / `throttled` and reads them. The orchestrator owns the single transaction and savepoint: parse (pure) -> if unattributable stop -> throttle -> throttled: count + 429 result; invalid: count; valid: far-future check, apply inside the savepoint, count by outcome; on apply failure roll back to the savepoint, keep the slot, report failure. | Orchestrator tests per request type (counters and window rows as in the table); failure-injection test: a forced apply failure leaves one extra `request_log` row, no reservation and no counter change. |
+| 7 | **HTTP endpoints** | `POST /api/reservations/ingest` and `GET /api/reservations/stats/{supplierId}` (zeros for unknown supplier); HTTP mapping (201/200/400/429/500, `Retry-After`). **Trap:** `[ApiController]` auto-400 and model binding run before our code, which would skip the throttle and miss unattributable-request handling, so read the raw body manually (or disable automatic model-state 400). Wire `IngestJson.Options` into MVC. | HTTP-level tests through `WebApplicationFactory` for every outcome and status code; stats match outcomes after a mixed sequence of requests. |
 | 8 | **Concurrency tests** | Parallel requests on separate connections (and separate app instances against one DB file): exactly 100 admitted out of 150; concurrent same-reservation writes end consistent; no `SQLITE_BUSY` surfacing as 500. | Tests pass repeatedly (run several times to catch flakiness). |
 | 9 | **Cleanup job** | `BackgroundService` doing the global `DELETE ... tsMs <= now - 60000` about every minute; configurable interval. | Test: deletes only out-of-window rows and never changes a throttle decision. |
 | 10 | **Wrap-up** | Final README trim (half page), run instructions, review diff against this plan, unedited transcript export. | Checklist in the README's three sections complete; all tests green. |
 
-Order notes: 3 can be done before or after 2; 4 and 5 are independent of each other once 2 exists; 6 needs 3, 4 and 5; 8 and 9 come last because they build on the finished path.
+Order notes: 4 and 5 are independent of each other once 2 exists; 6 needs 3, 4 and 5; 7 needs 6; 8 and 9 come last because they build on the finished path.
 
 ## Next steps
 1. Review/adjust the chunks above.
