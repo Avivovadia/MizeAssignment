@@ -2,19 +2,23 @@
 
 Project: Supplier Feed Throttle & Dedup Service (see `candidate-brief.txt`). ASP.NET Core 8+, SQLite, Dapper.
 
-## README maintenance (standing instruction)
-Keep `README.md` current as part of every change. When a decision, assumption, disagreement, or "do differently" idea is made or changed, update the matching README section in the **same turn**, without being asked.
+## Docs maintenance (standing instruction)
+Two documents, kept current in the same turn as any decision change, without being asked:
 
-README sections to maintain:
-1. **Assumptions** — include the zero-tolerance/exact rate limiting assumption (no slack, no approximate counters, no per-instance clocks) and the DB-as-single-source-of-truth assumption.
-2. **Where I disagreed with / changed Claude Code's suggestions** — record what Claude proposed, what the user chose instead, and the user's reasoning.
-3. **What I'd do differently with more time** — include Redis (or similar) as the window store instead of the DB, with the reasons.
+- **`plan.md`** — the full plan: principles, processing order, request types table, stats, concurrency design, assumptions, known limitations, decisions history, testing plan. Put all detail here.
+- **`README.md`** — short (about half a page). Only the **key decisions made on the spec**, plus the two submission sections. Do not copy detail from `plan.md` into it, and do not restructure it.
 
-Guidelines: keep it about half a page; record the user's reasoning, not just the outcome; update existing entries instead of duplicating.
+README sections (keep these three, keep each brief):
+1. **Key decisions / assumptions** — only decisions that shape the spec's behavior (e.g. exact limit with no slack, DB as single source of truth, identity and versioning, throttle-before-validation, response/stats vocabulary).
+2. **Where I disagreed with / changed Claude Code's suggestions** — what Claude proposed, what the user chose, and why.
+3. **What I'd do differently with more time** — include Redis (or similar) as the window store instead of the DB.
+
+Update existing entries instead of duplicating; record the user's reasoning, not just the outcome.
 
 ## Working rules
 - No code until the user approves the spec/plan stage (brainstorming gate).
 - Never edit or trim the exported transcript.
 - Throttle check runs before validation. The DB stamps time; app code never supplies "now" for throttling.
+- Terminology: response `status` is `ingested` | `ignored` | `throttled`, matching the stats counters; `detail` is `created` | `updated` | `duplicate` | `outofdate`.
 - Tests control time by inserting backdated `request_log` rows (no sleeping, no fake clock).
 - TDD for dedup and throttle logic.

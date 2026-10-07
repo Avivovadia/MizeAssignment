@@ -1,26 +1,21 @@
 # Supplier Feed Throttle & Dedup Service
 
-ASP.NET Core (.NET 8+) Web API + SQLite + Dapper. Ingests supplier reservation updates, dedupes resends, throttles noisy suppliers (>100 requests / rolling 60s) across multiple instances.
+ASP.NET Core 8+ Web API + SQLite + Dapper. Dedupes supplier reservation updates and throttles suppliers (>100 requests / rolling 60s) across multiple instances. Full details: `plan.md`.
 
-> Status: planning complete, implementation not started. This README records decisions so far.
+> Status: planning complete, implementation not started.
 
-## Assumptions
-- **Zero tolerance for rate-limit overhead or slack.** The limit is exact: request 101 in any rolling 60s window is never admitted. We accept a DB round trip and a write per request for that. No local caches, approximate counters, or per-instance clocks.
-- **The database is the single source of truth for both window state and time.** The window is a `request_log` table; the check-and-insert is one atomic statement and the DB stamps the time.
-- Reservation identity is `(supplierId, reservationId)`. `updatedAtUtc` is a version, not a "detail". Same details = `roomId`, `checkIn`, `checkOut`, `price`.
-- Older `updatedAtUtc` with different details is `stale` and ignored (out-of-order retries must not revert newer data). Identical details = `unchanged`, no write.
-- Supplier identity is the `supplierId` in the body (no auth). Requests without a usable `supplierId` get 400 and aren't counted.
-- Throttle check runs **before** validation. Every attributable request counts toward the limit (writes, duplicates, stale, invalid). Throttled requests do not occupy the window, so a supplier is released as soon as old requests age out.
-- Responses: 201 `created`; 200 with `status` = `updated` / `unchanged` / `stale`; 400 invalid; 429 + `Retry-After` throttled.
-- Stats are lifetime counters: `ingested` (created + updated), `throttled`, `unchanged`, `stale`. Unknown supplier returns zeros (200).
-- Validation: required fields, `checkOut > checkIn`, `price >= 0`; timestamps normalized to UTC. No room-overlap/double-booking checks.
-- `request_log` cleanup: on each admitted request, delete that supplier's rows older than 60s (same transaction). Bounded at ~100 rows per supplier, no background service.
-- **SQLite caveat:** SQLite has no server clock; its "now" is the OS clock of the app process. "DB as single clock" holds only because all instances share one host. Multi-host needs a server DB (e.g. SQL Server `SYSUTCDATETIME()` with `UPDLOCK, HOLDLOCK`). SQLite has no monotonic time, so host clock jumps shift the window. Tests control time by inserting backdated rows.
+## Key decisions / assumptions
+- **Exact limit, no slack:** request 101 in any rolling 60s is never admitted. The cost is DB writes per request, a deliberate trade of performance for accuracy.
+- **The database is the single source of truth** for the window state and the clock (one atomic check-and-insert). On SQLite this only holds on one host: SQLite's "now" is the app process's OS clock.
+- **Identity** is `(supplierId, reservationId)`; `updatedAtUtc` is the version. An older version with different details is ignored as `outofdate`.
+- **Throttle runs before validation**; every attributable request counts, throttled ones don't occupy the window.
+- **Responses and stats share one vocabulary:** `ingested` (created/updated), `ignored` (duplicate/outofdate), `throttled` (429 + `Retry-After`). 400 for invalid input.
 
 ## Where I disagreed with / changed Claude Code's suggestions
-- **Clock source:** Claude's first option was each instance using its own clock and accepting small skew. Rejected: it gives no single source of truth, which conflicts with the exact-limit assumption. Switched to DB-stamped time.
+- Claude proposed per-instance clocks with accepted skew. Rejected: it breaks the single-source-of-truth and exact-limit assumptions. Switched to DB-stamped time.
+- Claude proposed deleting old window rows on every request, then a cleanup job inside each service instance. I disagreed with both: per-request deletes add write load on every call, and N instances each running their own cleaner is redundant. SQLite has no row TTL or scheduler, so the in-service job stays only because the fixed stack leaves no alternative.
 
 ## What I'd do differently with more time
-- **Redis (or similar) as the rate-limit window store instead of the DB:** lower latency, atomic sliding window (sorted set / Lua) or `INCR` + TTL, native expiry (no cleanup), one shared clock, and it takes write load off the reservations DB. Not used because the assignment fixes the stack (ASP.NET + SQL + Dapper).
-- A server DB (SQL Server) with proper locking, so the single-clock guarantee is real across hosts.
-- Per-supplier auth, metrics on stale rate, windowed stats, background cleanup if the table grows.
+- **Redis (or similar) as the window store** instead of the DB: lower latency, atomic sliding window, native expiry, one shared clock, no load on the reservations DB. Not used because the assignment fixes the stack.
+- **Replace the in-service cleanup job with one external cleaner** (cron job or DB-side scheduler), so cleanup runs once rather than once per instance. With Redis this disappears entirely (native TTL).
+- A server DB (e.g. SQL Server) with proper locking, per-supplier auth, per-IP limits, windowed stats.
