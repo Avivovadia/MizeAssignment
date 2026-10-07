@@ -5,8 +5,7 @@ Project: Supplier Feed Throttle & Dedup Service (see `candidate-brief.txt`). ASP
 ## Docs maintenance (standing instruction)
 Two documents, kept current in the same turn as any decision change, without being asked:
 
-- **`plan.md`** — the full plan: principles, processing order, request types table, stats, concurrency design, assumptions, known limitations, decisions history, testing plan. Put all detail here.
-- **`README.md`** — short (about half a page). Only the **key decisions made on the spec**, plus the two submission sections. Do not copy detail from `plan.md` into it, and do not restructure it.
+- **`README.md`** — short (about half a page). Only the **key decisions made on the spec**, plus the two submission sections.
 
 README sections (keep these three, keep each brief):
 1. **Key decisions / assumptions** — only decisions that shape the spec's behavior (e.g. exact limit with no slack, DB as single source of truth, identity and versioning, throttle-before-validation, response/stats vocabulary).
