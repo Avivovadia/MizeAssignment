@@ -1,0 +1,99 @@
+BACKEND TAKE-HOME EXERCISE: SUPPLIER FEED THROTTLE & DEDUP SERVICE
+
+Tooling: You MUST use Claude Code for this exercise. Use it the way you would on the job — you don't have to write every line yourself, but you're responsible for the result.
+Submission: 
+	(1) the code repo 
+	(2) your full Claude Code chat transcript 
+	(3) a short README (see bottom)
+
+---
+
+WHY CLAUDE CODE IS REQUIRED
+
+We're not just checking whether the code works. 
+We're looking at how you work with an AI coding assistant: 
+how you scope a task for it, when you push back on what it produces, and how you catch problems before they ship. That's a normal part of the job here. 
+
+Treat this like a real work session, not a performance for us — think out loud in your prompts, ask Claude to explain anything you're unsure about, and redirect it when something looks off.
+
+Setup: Installing Claude Code & Your API Key
+
+We'll provide you with an Anthropic API key for this exercise — use it only for this assignment, and don't share it beyond your own machine. 
+The key is scoped only to Claude Sonnet 5.5 — other models will be blocked, so make sure Claude Code is using Sonnet 5.5.
+
+1. Install Claude Code
+   Follow the installation instructions at https://docs.claude.com/en/docs/claude-code/overview to install the Claude Code CLI for your platform.
+
+2. Set your API key
+   Set the key we provided as the ANTHROPIC_API_KEY environment variable on your machine.
+
+If the key is set correctly, Claude Code will use it directly rather than prompting you to log in.
+If you run into installation issues or the api key is faulty, see the documentation or reach out to us.
+
+---
+
+BACKGROUND
+
+Think of this like Mize's own systems: we receive reservation updates (on multiple server instances) from several external suppliers through a webhook-style feed. 
+Suppliers sometimes resend the same update more than once (network retries, bugs on their end), and some suppliers send far more traffic than they should. 
+We need a small service that sits in front of our reservations table and handles both problems.
+
+WHAT TO BUILD
+
+An ASP.NET Core Web API (.NET 8+) backed by SQL (SQLite or LocalDB — your choice, either is fine) using Dapper for data access.
+
+Endpoints:
+
+1. POST /api/reservations/ingest
+
+   Request Body:
+   {
+     "supplierId": "string",
+     "reservationId": "string",
+     "roomId": "string",
+     "checkIn": "2026-08-01T00:00:00Z",
+     "checkOut": "2026-08-03T00:00:00Z",
+     "price": 450.00,
+     "updatedAtUtc": "2026-07-01T10:15:00Z"
+   }
+
+   - Save the reservation.
+   - If this exact reservation was already saved with the same details, don't write it again — respond in a way that makes clear nothing changed.
+   - If the same reservationId arrives again but with different details, update the existing record.
+   - If a supplier sends more than 100 requests within any rolling 60-second window, reject that supplier's further requests until the window clears.
+
+2. GET /api/reservations/stats/{supplierId}
+   Return how many reservations were ingested vs. how many requests were throttled for that supplier.
+
+Baseline expectations: 
+a clean project structure, reasonable error handling, and enough tests to give us confidence the dedup and throttle logic actually work. 
+We don't expect production-level hardening (auth, observability, etc.) — this is a scoped exercise.
+
+That's the spec as given. Real feature requests are rarely fully specified — if something's unclear, handle it the way you would on the job.
+
+WHAT WE WANT TO SEE
+
+- Working code that meets the spec above.
+- A Claude Code session where you're actively directing the work: setting scope, pushing back on things you disagree with, 
+	asking it to justify decisions, and redirecting it when needed — not just accepting its first pass end to end.
+- Judgment on tradeoffs (correctness vs. simplicity, concurrency behavior, etc.), including any case where you decided not to do something Claude suggested, and why.
+
+SUBMISSION — README
+
+Along with the code, write a short README (half a page is plenty) covering:
+- Any assumptions you made where the spec was unclear, and why.
+- Anything Claude Code suggested that you disagreed with or changed, and why.
+- Anything you'd do differently with more time.
+
+EXPORTING YOUR CLAUDE CODE TRANSCRIPT
+
+At the end of your session, run:
+  /export
+
+This opens a menu to copy the transcript to your clipboard or save it to a file. 
+Save it to a file and include it with your submission alongside the repo.
+
+If export command doesn't work, ask directly to export the conversation to a text file for review. 
+Don't edit or trim the transcript — we want to see the real session.
+
+Good luck — treat Claude Code the way you would at your own desk on a normal day.
