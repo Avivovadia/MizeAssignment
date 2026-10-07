@@ -20,4 +20,5 @@ ASP.NET Core 8+ Web API + SQLite + Dapper. Dedupes supplier reservation updates 
 ## What I'd do differently with more time
 - **Redis (or similar) as the window store** instead of the DB: lower latency, atomic sliding window, native expiry, one shared clock, no load on the reservations DB. Not used because the assignment fixes the stack.
 - **Replace the in-service cleanup job with one external cleaner** (cron job or DB-side scheduler), so cleanup runs once rather than once per instance. With Redis this disappears entirely (native TTL).
+- **Move the stats counters out of the request transaction on a server DB:** write a cheap event row in the same transaction (still exact after a crash) and aggregate the per-supplier counters asynchronously, so a hot supplier's counter row isn't updated on every request. On SQLite there is a single writer, so splitting would add a second lock acquisition and allow crash drift for no gain.
 - A server DB (e.g. SQL Server) with proper locking, per-supplier auth, per-IP limits, windowed stats.

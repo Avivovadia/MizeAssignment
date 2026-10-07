@@ -9,21 +9,10 @@ namespace SupplierFeed.Api.Domain;
 /// </summary>
 public static class IngestParser
 {
-    private static class Field
-    {
-        public const string SupplierId = "supplierId";
-        public const string ReservationId = "reservationId";
-        public const string RoomId = "roomId";
-        public const string CheckIn = "checkIn";
-        public const string CheckOut = "checkOut";
-        public const string Price = "price";
-        public const string UpdatedAtUtc = "updatedAtUtc";
-    }
-
     private static class Message
     {
-        public const string CheckOutNotAfterCheckIn = $"{Field.CheckOut} must be after {Field.CheckIn}";
-        public const string NegativePrice = $"{Field.Price} must be >= 0";
+        public const string CheckOutNotAfterCheckIn = $"{IngestFields.CheckOut} must be after {IngestFields.CheckIn}";
+        public const string NegativePrice = $"{IngestFields.Price} must be >= 0";
 
         public static string Required(string field) => $"{field} is required";
         public static string MustBeString(string field) => $"{field} must be a string";
@@ -58,7 +47,7 @@ public static class IngestParser
         {
             var root = document.RootElement;
             if (root.ValueKind != JsonValueKind.Object
-                || !TryGetProperty(root, Field.SupplierId, out var supplierElement)
+                || !TryGetProperty(root, IngestFields.SupplierId, out var supplierElement)
                 || supplierElement.ValueKind != JsonValueKind.String
                 || string.IsNullOrWhiteSpace(supplierElement.GetString()))
             {
@@ -68,12 +57,12 @@ public static class IngestParser
             var supplierId = supplierElement.GetString()!;
             var errors = new List<string>();
 
-            var reservationId = ReadText(root, Field.ReservationId, errors);
-            var roomId = ReadText(root, Field.RoomId, errors);
-            var checkIn = ReadTimestamp(root, Field.CheckIn, errors);
-            var checkOut = ReadTimestamp(root, Field.CheckOut, errors);
+            var reservationId = ReadText(root, IngestFields.ReservationId, errors);
+            var roomId = ReadText(root, IngestFields.RoomId, errors);
+            var checkIn = ReadTimestamp(root, IngestFields.CheckIn, errors);
+            var checkOut = ReadTimestamp(root, IngestFields.CheckOut, errors);
             var price = ReadPrice(root, errors);
-            var updatedAt = ReadTimestamp(root, Field.UpdatedAtUtc, errors);
+            var updatedAt = ReadTimestamp(root, IngestFields.UpdatedAtUtc, errors);
 
             if (checkIn is { } from && checkOut is { } to && to <= from)
                 errors.Add(Message.CheckOutNotAfterCheckIn);
@@ -138,15 +127,15 @@ public static class IngestParser
 
     private static decimal? ReadPrice(JsonElement root, List<string> errors)
     {
-        if (!TryGetProperty(root, Field.Price, out var element) || element.ValueKind == JsonValueKind.Null)
+        if (!TryGetProperty(root, IngestFields.Price, out var element) || element.ValueKind == JsonValueKind.Null)
         {
-            errors.Add(Message.Required(Field.Price));
+            errors.Add(Message.Required(IngestFields.Price));
             return null;
         }
 
         if (element.ValueKind != JsonValueKind.Number || !element.TryGetDecimal(out var price))
         {
-            errors.Add(Message.MustBeNumber(Field.Price));
+            errors.Add(Message.MustBeNumber(IngestFields.Price));
             return null;
         }
 

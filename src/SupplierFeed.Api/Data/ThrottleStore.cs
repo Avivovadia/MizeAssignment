@@ -10,12 +10,6 @@ namespace SupplierFeed.Api.Data;
 /// </summary>
 public sealed class ThrottleStore
 {
-    private const long MillisecondsPerSecond = 1000;
-
-    // The DB's clock. Read once per decision and reused for the count, the insert and the retry time,
-    // so the answer is consistent with the decision. The app never invents "now".
-    private const string DbNowMsSql = "select cast(unixepoch('subsec') * 1000 as integer)";
-
     // Count and insert are one statement, so two requests can never both take the last slot.
     private const string AdmitSql = @"
         insert into request_log (supplierId, tsMs)
@@ -39,7 +33,7 @@ public sealed class ThrottleStore
 
         _limit = options.Limit;
         _windowSeconds = options.WindowSeconds;
-        _windowMs = options.WindowSeconds * MillisecondsPerSecond;
+        _windowMs = (long)TimeSpan.FromSeconds(options.WindowSeconds).TotalMilliseconds;
     }
 
     /// <remarks>
@@ -49,7 +43,9 @@ public sealed class ThrottleStore
     /// the instant and using it. With a deferred transaction the instant could be stale by the lock wait.
     /// </remarks>
     public ThrottleDecision TryAdmit(IDbConnection connection, IDbTransaction transaction, string supplierId) =>
-        TryAdmitAt(connection, transaction, supplierId, connection.ExecuteScalar<long>(DbNowMsSql, transaction: transaction));
+        // The DB's clock, read once per decision and reused for the count, the insert and the retry time,
+        // so the answer is consistent with the decision. The app never invents "now".
+        TryAdmitAt(connection, transaction, supplierId, DbClock.NowMs(connection, transaction));
 
     /// <summary>Same as <see cref="TryAdmit"/> at a given instant. Internal so tests can fix the clock.</summary>
     internal ThrottleDecision TryAdmitAt(IDbConnection connection, IDbTransaction transaction, string supplierId, long nowMs)
