@@ -7,6 +7,7 @@ var throttleOptions = builder.Configuration.GetSection(ThrottleOptions.SectionNa
 
 builder.Services.AddSingleton(new SqliteConnectionFactory(connectionString));
 builder.Services.AddSingleton(new ThrottleStore(throttleOptions)); // validates the options at startup
+builder.Services.AddSingleton<ReservationStore>();
 builder.Services.AddControllers();
 
 var app = builder.Build();
