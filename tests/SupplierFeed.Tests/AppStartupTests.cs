@@ -1,6 +1,8 @@
 using System.Net;
 using Dapper;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.DependencyInjection;
+using SupplierFeed.Api.Data;
 using SupplierFeed.Tests.Support;
 
 namespace SupplierFeed.Tests;
@@ -34,6 +36,24 @@ public class AppStartupTests
         var response = await client.GetAsync("/does-not-exist");
 
         Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.NotFound));
+    }
+
+    [Test]
+    public void Throttle_options_are_bound_from_configuration()
+    {
+        using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
+        {
+            b.UseSetting("ConnectionStrings:Default", _db.ConnectionString);
+            b.UseSetting("Throttle:Limit", "2");
+        });
+        var store = factory.Services.GetRequiredService<ThrottleStore>();
+
+        using var connection = _db.Factory.Open();
+        using var transaction = connection.BeginTransaction();
+        var decisions = Enumerable.Range(0, 3).Select(_ => store.TryAdmit(connection, transaction, "config-test")).ToList();
+
+        Assert.That(decisions.OfType<ThrottleDecision.Admitted>().Count(), Is.EqualTo(2));
+        Assert.That(decisions[2], Is.InstanceOf<ThrottleDecision.Throttled>());
     }
 
     [Test]

@@ -21,7 +21,15 @@ public enum IngestDetail
     OutOfDate,
 }
 
-public sealed record IngestResponse(IngestStatus Status, IngestDetail? Detail = null, int? RetryAfterSeconds = null);
+/// <param name="RetryAfterMs">Exact time until the supplier can retry. The HTTP Retry-After header can only carry whole seconds, so it is rounded up there.</param>
+/// <param name="Limit">Throttled only: the configured limit that was exceeded.</param>
+/// <param name="WindowSeconds">Throttled only: the window the limit applies to (e.g. 100 requests per 60 seconds).</param>
+public sealed record IngestResponse(
+    IngestStatus Status,
+    IngestDetail? Detail = null,
+    long? RetryAfterMs = null,
+    int? Limit = null,
+    int? WindowSeconds = null);
 
 public sealed record ErrorResponse(IReadOnlyList<string> Errors)
 {

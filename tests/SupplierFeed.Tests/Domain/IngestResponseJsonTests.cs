@@ -25,11 +25,12 @@ public class IngestResponseJsonTests
     }
 
     [Test]
-    public void Throttled_response_carries_retry_after_and_no_detail()
+    public void Throttled_response_carries_exact_retry_after_and_the_rule_that_was_exceeded()
     {
-        var json = Serialize(new IngestResponse(IngestStatus.Throttled, RetryAfterSeconds: 30));
+        var json = Serialize(new IngestResponse(IngestStatus.Throttled, RetryAfterMs: 29_940, Limit: 100, WindowSeconds: 60));
 
-        Assert.That(json, Is.EqualTo("{\"status\":\"throttled\",\"retryAfterSeconds\":30}"));
+        Assert.That(json, Is.EqualTo(
+            "{\"status\":\"throttled\",\"retryAfterMs\":29940,\"limit\":100,\"windowSeconds\":60}"));
     }
 
     [Test]

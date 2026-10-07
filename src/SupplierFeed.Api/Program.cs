@@ -3,7 +3,10 @@ using SupplierFeed.Api.Data;
 var builder = WebApplication.CreateBuilder(args);
 
 var connectionString = builder.Configuration.GetConnectionString("Default") ?? "Data Source=supplierfeed.db";
+var throttleOptions = builder.Configuration.GetSection(ThrottleOptions.SectionName).Get<ThrottleOptions>() ?? new ThrottleOptions();
+
 builder.Services.AddSingleton(new SqliteConnectionFactory(connectionString));
+builder.Services.AddSingleton(new ThrottleStore(throttleOptions)); // validates the options at startup
 builder.Services.AddControllers();
 
 var app = builder.Build();
