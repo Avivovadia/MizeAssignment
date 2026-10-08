@@ -14,6 +14,7 @@ builder.Services.AddSingleton<ReservationStore>();
 builder.Services.AddSingleton<StatsStore>();
 builder.Services.AddSingleton(new UpdatedAtPolicy(updatedAtOptions)); // validates the options at startup
 builder.Services.AddSingleton<IngestOrchestrator>();
+builder.Services.AddSingleton<StatsService>();
 builder.Services.AddControllers();
 
 var app = builder.Build();

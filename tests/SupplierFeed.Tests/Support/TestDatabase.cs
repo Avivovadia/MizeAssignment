@@ -42,6 +42,18 @@ public sealed class TestDatabase : IDisposable
         transaction.Commit();
     }
 
+    public long Count(string table)
+    {
+        using var connection = Factory.Open();
+        return connection.ExecuteScalar<long>($"select count(*) from {table}");
+    }
+
+    public void Exec(string sql)
+    {
+        using var connection = Factory.Open();
+        connection.Execute(sql);
+    }
+
     public long LogCount(string supplierId)
     {
         using var connection = Factory.Open();
