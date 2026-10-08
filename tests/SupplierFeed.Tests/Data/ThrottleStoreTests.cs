@@ -76,18 +76,30 @@ public class ThrottleStoreTests
 
     // The store reads the clock inside the caller's transaction and relies on that transaction already
     // holding the write lock (otherwise another writer could slip in between the clock read and the
-    // insert, leaving the admit row stamped too early). This pins the library default it depends on.
+    // insert, leaving the admit row stamped too early). The orchestrator starts its transaction with
+    // BeginWriteTransaction, so this pins exactly that call.
     [Test]
-    public void Default_transactions_take_the_write_lock_before_any_statement_runs()
+    public void Write_transactions_take_the_write_lock_before_any_statement_runs()
     {
         using var holder = _db.Factory.Open();
-        using var transaction = holder.BeginTransaction(); // no statement executed yet
+        using var transaction = holder.BeginWriteTransaction(); // no statement executed yet
 
         using var other = new SqliteConnectionFactory($"{_db.ConnectionString};Default Timeout=1").Open();
         var exception = Assert.Throws<SqliteException>(() =>
             other.Execute("insert into request_log (supplierId, tsMs) values ('other', 1)"));
 
         Assert.That(exception!.SqliteErrorCode, Is.EqualTo(5)); // SQLITE_BUSY
+    }
+
+    [Test]
+    public void A_deferred_transaction_does_not_hold_the_lock_which_is_why_it_must_not_be_used()
+    {
+        using var holder = _db.Factory.Open();
+        using var transaction = holder.BeginTransaction(deferred: true); // no statement executed yet
+
+        using var other = new SqliteConnectionFactory($"{_db.ConnectionString};Default Timeout=1").Open();
+
+        Assert.DoesNotThrow(() => other.Execute("insert into request_log (supplierId, tsMs) values ('other', 1)"));
     }
 
     // ---- fixed-clock tests: the store is given the instant, rows sit at exact timestamps ----

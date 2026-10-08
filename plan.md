@@ -73,9 +73,10 @@ Notes:
 ## Known limitations
 - **SQLite clock:** SQLite has no server clock. Its "now" is the OS clock of the app process, so "DB as single clock" holds only because all instances share one host. Multi-host needs a server DB (e.g. SQL Server `SYSUTCDATETIME()` with `UPDLOCK, HOLDLOCK`). Instances on different hosts can't safely share a SQLite file over a network filesystem.
 - No monotonic time in SQLite: NTP/manual clock jumps on the host shift the window.
-- **Single writer lock:** every request writes (log row, counters; throttled ones too), so a flooding supplier can slow others.
+- **Single writer lock:** every request writes (log row, counters; throttled ones too), so a flooding supplier can slow others. Measured, see "Measured locking behavior": throughput falls as callers pile up, and scaling out instances does not add write throughput.
 - **Unattributable garbage** is unthrottled; without auth, anyone can spoof a `supplierId` and burn its quota. A per-IP limit would be the real fix (out of scope).
-- "Multiple instances" in tests are parallel connections in one process: same clock, not proof of multi-host behavior.
+- **Multi-instance coverage:** tested with several hosts in one process and with real separate OS processes sharing one database file, all on one machine (one clock, one filesystem). **Different-machine behavior is out of scope**: SQLite cannot safely span machines (file locking over a network filesystem is unreliable), so it is not tested; supporting it needs a server database (see the clock note above).
+- **Lock waits can time out:** a request waits for the write lock up to `Default Timeout` (15s). Under extreme contention it would fail with a 500 instead of waiting longer. The measurements below reached about 5s at 32 callers; failure at higher concurrency is expected but was not measured.
 
 ## Decisions history (challenge rounds)
 - Clock: Claude first proposed per-instance clocks accepting skew; rejected for DB-stamped time.
@@ -102,6 +103,30 @@ Measured with a throwaway console app (outside the repo, discarded) on `Microsof
 5. **The atomic admit holds under contention:** 150 admit statements from 8 threads, each on its own connection, against one file: exactly 100 admitted, 50 rejected, 0 errors, 100 rows in the log — both as a single autocommit statement and inside an explicit transaction.
 6. **Not covered:** separate OS processes (same file-lock mechanism, so expected to behave the same), the throttled-counter increment, and the reservation upsert; those are tested in chunks 4, 5 and 8.
 
+## Measured locking behavior (chunk 9)
+An on-demand report (`dotnet test -c Release --filter "TestCategory=Performance" --logger "console;verbosity=detailed"`, test class `LockingPerformanceReport`) measures the single writer lock. Release build, 8 cores, one local disk, 300 requests per row, callers on dedicated threads, full write path (parse, throttle, reservation, stats, commit). Reproducible within about 10% across runs.
+
+| Scenario | Callers | req/s | p50 ms | p99 ms | max ms |
+|---|---|---|---|---|---|
+| New reservation per request, never throttled | 1 | 355 | 2.6 | 5.1 | 38 |
+| | 8 | 170 | 2.6 | 1284 | 1763 |
+| | 32 | 54 | 2.8 | 5116 | 5593 |
+| One supplier already throttled (abuse path) | 1 | 423 | 2.3 | 3.8 | 6 |
+| | 32 | 83 | 2.3 | 3138 | 3610 |
+| One supplier flooding from empty | 1 | 394 | 2.4 | 3.8 | 14 |
+| | 32 | 59 | 2.5 | 4597 | 4935 |
+| Same, 2 real server processes over HTTP | 8 | 140 | 3.0 | 1428 | 2143 |
+| | 32 | 107 | 80.8 | 2315 | 2793 |
+| Same flood with at most 1 writer per process (queue in front of the DB) | 8 / 16 / 32 | 382 / 377 / 373 | 2.6 | ~770-790 | ~780-800 |
+
+What it shows:
+- **A request that gets the lock is fast (p50 ~2.5ms); the cost is waiting for it.** Throughput falls as callers are added (355 req/s with 1 caller, 54 with 32) and the tail explodes (p99 over 5s at 32 callers). The writer lock is the bottleneck, and waiting callers make it worse, not better.
+- **The throttled (abuse) path costs about the same as a normal write** (it still commits a counter), so a flooding supplier occupies the shared lock as much as normal traffic and raises latency for every supplier.
+- **Scaling out does not help write throughput:** two real processes sharing the file were no faster than one. All instances contend for the same file lock.
+- **The cause is the waiting, not the disk:** with 8 callers, 'synchronous = NORMAL' did not raise commit throughput (264-598/s versus 230-306/s for the default FULL), although it made single-caller commits 15-20x faster (about 6000-9000/s versus 410-450/s).
+- **A queue in front of the lock fixes the collapse:** letting 1 writer per process into the database at a time (the rest wait in memory) held throughput at the single-caller level (~375 req/s) for 8, 16 and 32 callers, finished the 300 requests in 0.8s instead of 5.1s, and cut the worst wait from 4.9s to 0.8s. Not implemented yet (a design decision); the experiment is in the report (section D).
+- **Likely next steps, in order of payoff:** bound concurrent writers per instance (about 6x at 32 callers); then `synchronous = NORMAL` once writers are serialized (trade-off: after an OS or power failure the last few commits may be lost, which can let a supplier slightly exceed its limit once; an application crash alone loses nothing; this combination is unmeasured end to end); for real scale, Redis for the window (README).
+
 ## Implementation chunks
 Each chunk is small, test-first (TDD), ends green, and is committed on its own. Starting point: the untracked IDE template (`SupplierFeed.sln`, `src/SupplierFeed.Api`, `tests/SupplierFeed.Tests`; controllers-based Web API, tests csproj is empty).
 
@@ -116,7 +141,7 @@ Each chunk is small, test-first (TDD), ends green, and is committed on its own. 
 | 6 | **Building blocks: DB clock, future-timestamp policy, stats store** — **DONE** | `DbClock.NowMs` (the clock query now private to `ThrottleStore` moves into it). `UpdatedAtPolicy` (configured max future skew, default 300s, error message includes it): the orchestrator-only future-timestamp validation. `StatsStore.Record(...)` overloads take the *results* (`IngestDetail`, `ThrottleDecision.Throttled`, `IngestParseResult.Invalid`) and own the mapping result -> counter (`ingested` / `ignored` / `invalid` / `throttled`); `StatsStore.Get` reads them (zeros for an unknown supplier). The throttle store never touches stats; the orchestrator only passes results to the stats store. | Each result type bumps exactly its own counter; first increment creates the row; per-supplier isolation; rollback leaves no counts; clock close to the process clock and never goes backwards; policy passes at exactly the skew and fails 1ms over, message carries the configured value; config binding through the app. |
 | 7 | **Ingest orchestrator** (service, no HTTP) — **DONE** | `Ingest(string? body)` -> `Unattributable` / `Invalid` / `Throttled` / `Processed` / `Failed`. Owns the single transaction and savepoint: parse (pure) -> if unattributable stop (no DB) -> future-timestamp validation right after the parse validation (DB clock) -> throttle -> throttled: pass the throttle result to the stats store (and the invalid verdict too, if there is one), commit; admitted: all remaining work inside a savepoint (invalid: record it; valid: apply the reservation, record the outcome); on failure roll back to the savepoint, keep the admit row, commit, log, return `Failed`. | Orchestrator tests per request type (result, reservation rows, `request_log` rows, every counter); invalid and future-dated requests count toward the limit; a throttled request writes no reservation; counters add up to attributable requests; failure injection with a DB trigger that makes reservation inserts fail: one extra `request_log` row, no reservation, no counter change, next request works. |
 | 8 | **HTTP endpoints** — **DONE**; also smoke-tested against the real Kestrel server with curl (201/200/400/429 + `Retry-After`, stats). An invalid payload that is throttled returns 429 | `POST /api/reservations/ingest` and `GET /api/reservations/stats/{supplierId}` (zeros for unknown supplier); HTTP mapping (201/200/400/429/500; 429 sets the `Retry-After` header to the exact retry time rounded up to whole seconds, since the header can't carry fractions, and the body carries `retryAfterMs`, `limit`, `windowSeconds`). **Trap:** `[ApiController]` auto-400 and model binding run before our code, which would skip the throttle and miss unattributable-request handling, so read the raw body manually (or disable automatic model-state 400). Wire `IngestJson.Options` into MVC. | HTTP-level tests through `WebApplicationFactory` for every outcome and status code; stats match outcomes after a mixed sequence of requests. |
-| 9 | **Concurrency tests** | Parallel requests on separate connections (and separate app instances against one DB file): exactly 100 admitted out of 150; concurrent same-reservation writes end consistent; no `SQLITE_BUSY` surfacing as 500. | Tests pass repeatedly (run several times to catch flakiness). |
+| 9 | **Concurrency tests** — **DONE**: orchestrator under 16 callers, 3 hosts sharing one file, and 2 real server processes started simultaneously (`Category("MultiProcess")`); plus an on-demand locking performance report and a `BeginWriteTransaction` helper so the lock precondition is pinned on the exact call the orchestrator makes | Parallel requests on separate connections (and separate app instances against one DB file): exactly 100 admitted out of 150; concurrent same-reservation writes end consistent; no `SQLITE_BUSY` surfacing as 500. | Tests pass repeatedly (run several times to catch flakiness). |
 | 10 | **Cleanup job** | `BackgroundService` doing the global `DELETE ... tsMs <= now - 60000` about every minute; configurable interval. | Test: deletes only out-of-window rows and never changes a throttle decision. |
 | 11 | **Wrap-up** | Final README trim (half page), run instructions, review diff against this plan, unedited transcript export. | Checklist in the README's three sections complete; all tests green. |
 

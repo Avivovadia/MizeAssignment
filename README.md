@@ -6,7 +6,7 @@ ASP.NET Core 8+ Web API + SQLite + Dapper. Dedupes supplier reservation updates 
 
 ## Key decisions / assumptions
 - **Exact limit, no slack:** request 101 in any rolling 60s is never admitted. The cost is DB writes per request, a deliberate trade of performance for accuracy.
-- **The database is the single source of truth** for the window state and the clock (one atomic check-and-insert). On SQLite this only holds on one host: SQLite's "now" is the app process's OS clock.
+- **The database is the single source of truth** for the window state and the clock (one atomic check-and-insert). On SQLite this only holds on one host: SQLite's "now" is the app process's OS clock. Multi-instance behavior is tested with real separate processes sharing one file on one machine; different-machine behavior is out of scope because SQLite cannot span machines.
 - **Identity** is `(supplierId, reservationId)`; `updatedAtUtc` is the version. An older version with different details is ignored as `outofdate`.
 - **Throttle runs before validation**; every attributable request counts, throttled ones don't occupy the window.
 - **One transaction per request**, owned by the orchestrator: the throttle slot, reservation write and stats counter commit together, so stats can't drift after a crash. The apply step runs in a savepoint so a failing request still consumes its quota slot.
@@ -20,5 +20,7 @@ ASP.NET Core 8+ Web API + SQLite + Dapper. Dedupes supplier reservation updates 
 ## What I'd do differently with more time
 - **Redis (or similar) as the window store** instead of the DB: lower latency, atomic sliding window, native expiry, one shared clock, no load on the reservations DB. Not used because the assignment fixes the stack.
 - **Replace the in-service cleanup job with one external cleaner** (cron job or DB-side scheduler), so cleanup runs once rather than once per instance. With Redis this disappears entirely (native TTL).
+- **Scale writes with a dedicated writer service fed by a message broker.** SQLite allows one writer, so the service that writes would be a single, non-scaled consumer while the API tier scales; this moves the throttle verdict off the request path, so it needs a decision (request-reply, or 202 and report throttling another way). Out of scope here.
+- **Bound concurrent writers per instance.** Measured: SQLite has one writer, so throughput falls from ~355 req/s with 1 caller to ~54 with 32 (p99 over 5s), and a second server process adds nothing. A queue in front of the DB held ~375 req/s at 32 callers (6x) in an experiment; not implemented. Details in `plan.md`.
 - **Move the stats counters out of the request transaction on a server DB:** write a cheap event row in the same transaction (still exact after a crash) and aggregate the per-supplier counters asynchronously, so a hot supplier's counter row isn't updated on every request. On SQLite there is a single writer, so splitting would add a second lock acquisition and allow crash drift for no gain.
 - A server DB (e.g. SQL Server) with proper locking, per-supplier auth, per-IP limits, windowed stats.

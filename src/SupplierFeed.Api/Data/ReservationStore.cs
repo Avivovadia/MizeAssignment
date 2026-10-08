@@ -8,7 +8,7 @@ namespace SupplierFeed.Api.Data;
 /// <summary>
 /// Applies a valid, already-admitted request to the reservations table and reports what happened.
 /// Knows nothing about throttling or stats. It reads the stored row and then writes, so it relies on the
-/// caller's transaction already holding the write lock (the default BeginTransaction() does);
+/// caller's transaction already holding the write lock (BeginWriteTransaction);
 /// the primary key (supplierId, reservationId) is the backstop against a double insert.
 /// </summary>
 public sealed class ReservationStore

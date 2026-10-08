@@ -47,7 +47,7 @@ public sealed class IngestOrchestrator
             return new IngestResult.Unattributable(new[] { UnattributableError });
 
         using var connection = _connectionFactory.Open();
-        using var transaction = connection.BeginTransaction();
+        using var transaction = connection.BeginWriteTransaction();
 
         var (supplierId, request, invalid) = Classify(parsed, connection, transaction);
 

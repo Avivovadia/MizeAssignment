@@ -37,8 +37,8 @@ public sealed class ThrottleStore
     }
 
     /// <remarks>
-    /// Precondition: <paramref name="transaction"/> already holds the write lock (the default
-    /// <c>BeginTransaction()</c> of Microsoft.Data.Sqlite does; <c>BeginTransaction(deferred: true)</c> does not).
+    /// Precondition: <paramref name="transaction"/> already holds the write lock (started with
+    /// <c>BeginWriteTransaction</c>; a deferred transaction does not).
     /// The clock is read after the lock is taken, so no other writer can change the log between reading
     /// the instant and using it. With a deferred transaction the instant could be stale by the lock wait.
     /// </remarks>
