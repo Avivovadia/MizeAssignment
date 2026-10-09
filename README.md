@@ -22,9 +22,9 @@ curl http://localhost:5227/api/reservations/stats/acme
 
 ## Key decisions / assumptions
 - **Exact limit, no slack.** Request 101 in any 60 seconds is never admitted.
-- **The database is the single source of truth** for the request count and the clock. Instances keep no counters or clocks of their own, so the limit stays exact across them.
+- **The database is the single source of truth** for the request count and the clock. Instances keep no counters or clocks of their own, so the limit stays exact across them. With SQLite, that means instances on one machine sharing one DB file.
 - **A reservation is identified by supplier and reservation ID, and `updatedAtUtc` is its version.** Suppliers may reuse IDs, and a delayed old retry must never overwrite newer data.
-- **Every request counts toward the limit, even invalid ones.** They still cost work, and a supplier sending garbage should be limited too. Rejected requests don't count.
+- **Every request counts toward the limit, even invalid ones.** They still cost work, and a supplier sending garbage should be limited too. Throttled requests don't count.
 - **One transaction per request**, so the count, the data and the stats commit together and a crash can't leave them disagreeing.
 - **Responses and stats use the same four words**, so what a supplier is told matches what we count:
   - **ingested**: a new or changed reservation was saved (201 / 200).
