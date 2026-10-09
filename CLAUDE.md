@@ -19,5 +19,5 @@ Update existing entries instead of duplicating; record the user's reasoning, not
 - Never edit or trim the exported transcript.
 - Flow: pure parse+validate first (no DB), then the throttle on every attributable request, then act on validity. The DB stamps time; app code never supplies "now" for throttling.
 - Terminology: response `status` is `ingested` | `ignored` | `invalid` | `throttled`, matching the stats counters; `detail` is `created` | `updated` | `duplicate` | `outofdate`.
-- Tests control time by inserting backdated `request_log` rows (no sleeping, no fake clock).
+- Tests control time without sleeping: either by inserting `request_log` rows backdated against the DB clock (with safe margins, never near a boundary), or by fixing the instant through the internal `TryAdmitAt` / `RunAt` methods with absolute timestamps (for exact boundaries). Production code never fakes the clock: it always reads the DB's.
 - TDD for dedup and throttle logic.

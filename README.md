@@ -2,7 +2,23 @@
 
 ASP.NET Core 8+ Web API + SQLite + Dapper. Dedupes supplier reservation updates and throttles suppliers (>100 requests / rolling 60s) across multiple instances. Full details: `plan.md`.
 
-> Status: planning complete, implementation not started.
+## Run it
+
+Requires the .NET 8 SDK or later. From the repo root:
+
+```bash
+dotnet build
+dotnet test                                    # whole suite, about a minute and a half (it includes real contention tests)
+dotnet run --project src/SupplierFeed.Api      # listens on http://localhost:5227, creates supplierfeed.db in the working directory
+```
+
+Try it (the database file is created on first start):
+
+```bash
+curl -i -X POST http://localhost:5227/api/reservations/ingest -H 'Content-Type: application/json' \
+  -d '{"supplierId":"acme","reservationId":"r1","roomId":"room-1","checkIn":"2026-08-01T00:00:00Z","checkOut":"2026-08-03T00:00:00Z","price":450.00,"updatedAtUtc":"2026-07-01T10:15:00Z"}'
+curl http://localhost:5227/api/reservations/stats/acme
+```
 
 ## Key decisions / assumptions
 - **Exact limit, no slack:** request 101 in any rolling 60s is never admitted. The cost is DB writes per request, a deliberate trade of performance for accuracy.
@@ -13,9 +29,10 @@ ASP.NET Core 8+ Web API + SQLite + Dapper. Dedupes supplier reservation updates 
 - **Responses and stats share one vocabulary:** `ingested` (created/updated), `ignored` (duplicate/outofdate), `invalid` (400), `throttled` (429 + `Retry-After`). `invalid` counts every bad payload even when the request is also throttled (so a supplier sending garbage stays visible during a flood); invalid requests count toward the limit but never touch `reservations`.
 
 ## Where I disagreed with / changed Claude Code's suggestions
-- Claude proposed per-instance clocks with accepted skew. Rejected: it breaks the single-source-of-truth and exact-limit assumptions. Switched to DB-stamped time.
-- Claude planned separate transactions for the throttle admit and the reservation write, as a default it hadn't stress-tested. I steered to one transaction per request after weighing the trade-offs: it gives consistent stats and one lock acquisition, at the cost of coupling the throttle to the DB transaction (a Redis window store would have to be split back out). A plain single transaction would have let persistently failing requests skip the limit; the savepoint closes that hole.
-- Claude proposed deleting old window rows on every request, then a cleanup job inside each service instance. I disagreed with both: per-request deletes add write load on every call, and N instances each running their own cleaner is redundant. SQLite has no row TTL or scheduler, so the in-service job stays only because the fixed stack leaves no alternative.
+- **Clock.** Claude proposed each instance using its own clock and tolerating a little skew. I chose the database as the only clock, because the limit has to be exact.
+- **Cleanup.** Claude proposed deleting old rows on every request, then a cleanup job in every instance. I rejected both (extra writes, redundant work) and wanted one external cleaner; SQLite has no expiry or scheduler, so the in-service job stays as a compromise.
+- **Retry time.** Claude rounded it to whole seconds and could return 0 to a throttled caller, which invites an instant retry. I flagged the bad UX; fixing it exposed a race, so the time is now exact and always above zero (only the HTTP header rounds up, as HTTP requires).
+- **Stats.** Claude kept duplicates and out-of-date updates as separate counters. I merged them into one "ignored" bucket, made responses use the same words as the stats, and added an "invalid" counter (a throttled invalid request counts in both, for visibility).
 
 ## What I'd do differently with more time
 - **Redis (or similar) as the window store** instead of the DB: lower latency, atomic sliding window, native expiry, one shared clock, no load on the reservations DB. Not used because the assignment fixes the stack.
