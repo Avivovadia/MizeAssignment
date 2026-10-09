@@ -38,6 +38,14 @@ public static class DatabaseInitializer
         using var connection = factory.Open();
         connection.Execute(Schema);
         // WAL is stored in the database file, so it only sticks once the file has been written.
-        connection.Execute("pragma journal_mode = wal");
+        var mode = connection.ExecuteScalar<string>("pragma journal_mode = wal");
+
+        // SQLite raises no error when it cannot switch; it just reports the mode it is still in.
+        if (!string.Equals(mode, "wal", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                $"The database could not be switched to WAL journal mode (it reports '{mode}'). " +
+                "The throttle relies on WAL so that readers never block the single writer.");
+        }
     }
 }

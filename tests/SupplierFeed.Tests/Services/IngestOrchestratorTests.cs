@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using Dapper;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using SupplierFeed.Api.Data;
 using SupplierFeed.Api.Domain;
@@ -25,13 +26,13 @@ public class IngestOrchestratorTests
     [TearDown]
     public void TearDown() => _db.Dispose();
 
-    private IngestOrchestrator Create(ThrottleOptions throttle, UpdatedAtOptions updatedAt) => new(
+    private IngestOrchestrator Create(ThrottleOptions throttle, UpdatedAtOptions updatedAt, ILogger<IngestOrchestrator>? logger = null) => new(
         _db.Factory,
         new ThrottleStore(throttle),
         new ReservationStore(),
         new StatsStore(),
         new UpdatedAtPolicy(updatedAt),
-        NullLogger<IngestOrchestrator>.Instance);
+        logger ?? NullLogger<IngestOrchestrator>.Instance);
 
     private IngestResult Ingest(JsonObject body) => _orchestrator.Ingest(body.ToJsonString());
 
@@ -323,6 +324,29 @@ public class IngestOrchestratorTests
         Exec("drop trigger fail_stats_insert");
         Exec("drop trigger fail_stats_update");
         Assert.That(Stats(), Is.EqualTo(Counters(ingested: 1)));
+    }
+
+    // SQLite can abort the whole transaction, not just the statement (disk full, I/O error). RAISE(ROLLBACK) in a
+    // trigger does exactly that, so the savepoint the orchestrator tries to roll back to no longer exists.
+    [Test]
+    public void When_sqlite_aborts_the_whole_transaction_the_original_error_is_still_logged_and_the_request_fails_cleanly()
+    {
+        var logger = new ListLogger<IngestOrchestrator>();
+        var orchestrator = Create(new ThrottleOptions(), new UpdatedAtOptions(), logger);
+        Exec("create trigger abort_everything before insert on reservations begin select raise(rollback, 'disk went away'); end");
+
+        var result = orchestrator.Ingest(TestBodies.Valid().ToJsonString());
+
+        Assert.That(result, Is.InstanceOf<IngestResult.Failed>(), "a handled failure, not an unhandled exception");
+        var errors = logger.Entries.Where(e => e.Level == LogLevel.Error).ToList();
+        Assert.That(errors.Select(e => e.Exception?.Message), Has.Some.Contains("disk went away"), "the original error must not be lost");
+        Assert.That(errors, Has.Count.GreaterThanOrEqualTo(2), "and the failed rollback is reported as well");
+        Assert.That(Count("reservations"), Is.Zero);
+        Assert.That(Count("request_log"), Is.Zero, "the whole transaction is gone, so even the quota slot cannot be kept");
+
+        Exec("drop trigger abort_everything");
+        Assert.That(orchestrator.Ingest(TestBodies.Valid().ToJsonString()), Is.EqualTo(new IngestResult.Processed(IngestDetail.Created)),
+            "the service recovers on the next request");
     }
 
     [Test]

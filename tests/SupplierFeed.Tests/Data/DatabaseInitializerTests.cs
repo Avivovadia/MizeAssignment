@@ -47,6 +47,20 @@ public class DatabaseInitializerTests
     }
 
  
+    // The throttle relies on WAL (readers never block the writer). If the switch cannot happen, SQLite does not
+    // raise an error: it just reports the mode it is still in. Starting anyway would run in a mode the design
+    // was not built for, so startup must fail loudly instead.
+    [Test]
+    public void Startup_fails_loudly_when_the_database_cannot_be_switched_to_wal()
+    {
+        // An in-memory database takes the schema fine but can never use WAL: SQLite answers "memory".
+        var inMemory = new SqliteConnectionFactory("Data Source=:memory:");
+
+        var exception = Assert.Throws<InvalidOperationException>(() => DatabaseInitializer.Initialize(inMemory));
+
+        Assert.That(exception!.Message, Does.Contain("WAL").And.Contain("memory"));
+    }
+
     [Test]
     public void Reservation_key_rejects_duplicate_for_same_supplier()
     {

@@ -65,9 +65,12 @@ public sealed class IngestOrchestrator
 
         var result = RunInSavepoint(transaction, supplierId, () => invalid is not null
             ? RecordInvalid(connection, transaction, supplierId, invalid)
-            : Apply(connection, transaction, request!));
+            : Apply(connection, transaction, request!), out var transactionAlive);
 
-        transaction.Commit();
+        // If SQLite aborted the whole transaction there is nothing left to commit.
+        if (transactionAlive)
+            transaction.Commit();
+
         return result;
     }
 
@@ -109,8 +112,10 @@ public sealed class IngestOrchestrator
         return new IngestResult.Processed(detail);
     }
 
-    private IngestResult RunInSavepoint(SqliteTransaction transaction, string supplierId, Func<IngestResult> work)
+    private IngestResult RunInSavepoint(
+        SqliteTransaction transaction, string supplierId, Func<IngestResult> work, out bool transactionAlive)
     {
+        transactionAlive = true;
         transaction.Save(ApplySavepoint);
         try
         {
@@ -120,9 +125,24 @@ public sealed class IngestOrchestrator
         }
         catch (Exception exception)
         {
-            transaction.Rollback(ApplySavepoint);
-            transaction.Release(ApplySavepoint);
-            _logger.LogError(exception, "Applying an admitted request for supplier {SupplierId} failed; its quota slot is kept", supplierId);
+            // Logged before rolling back: if SQLite already aborted the whole transaction (disk full, I/O error)
+            // the rollback below throws, and the original error must not be lost behind it.
+            _logger.LogError(exception, "Applying an admitted request for supplier {SupplierId} failed", supplierId);
+
+            try
+            {
+                transaction.Rollback(ApplySavepoint);
+                transaction.Release(ApplySavepoint);
+            }
+            catch (Exception rollbackException)
+            {
+                // The transaction itself is gone, so nothing can be kept, not even the quota slot.
+                _logger.LogError(rollbackException,
+                    "Rolling back to the savepoint for supplier {SupplierId} failed: the whole transaction was lost, so its quota slot is not kept",
+                    supplierId);
+                transactionAlive = false;
+            }
+
             return new IngestResult.Failed();
         }
     }
