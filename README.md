@@ -9,7 +9,7 @@ Requires the .NET 8 SDK or later. From the repo root:
 ```bash
 dotnet build
 dotnet test                                    # whole suite, about a minute and a half (it includes real contention tests)
-dotnet run --project src/SupplierFeed.Api      # listens on http://localhost:5227, creates supplierfeed.db in the working directory
+dotnet run --project src/SupplierFeed.Api      # listens on http://localhost:5227, creates supplierfeed.db in src/SupplierFeed.Api
 ```
 
 Try it (the database file is created on first start):
