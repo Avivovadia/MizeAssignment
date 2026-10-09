@@ -2,6 +2,7 @@ using System.Net;
 using Dapper;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using SupplierFeed.Api.Data;
 using SupplierFeed.Api.Domain;
 using SupplierFeed.Api.Services;
@@ -79,6 +80,27 @@ public class AppStartupTests
         var orchestrator = _factory.Services.GetRequiredService<IngestOrchestrator>();
 
         Assert.That(orchestrator.Ingest("not json"), Is.InstanceOf<IngestResult.Unattributable>());
+    }
+
+    [Test]
+    public void The_cleanup_service_runs_inside_the_app()
+    {
+        var hosted = _factory.Services.GetServices<IHostedService>();
+
+        Assert.That(hosted.OfType<RequestLogCleanupService>().Count(), Is.EqualTo(1));
+    }
+
+    [TestCase("Cleanup:BatchSize", "0")]
+    [TestCase("Cleanup:IntervalSeconds", "-1")]
+    public void Invalid_cleanup_configuration_stops_the_app_from_starting(string key, string value)
+    {
+        using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
+        {
+            b.UseSetting("ConnectionStrings:Default", _db.ConnectionString);
+            b.UseSetting(key, value);
+        });
+
+        Assert.That(() => factory.CreateClient(), Throws.Exception);
     }
 
     [Test]
