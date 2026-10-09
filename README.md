@@ -21,23 +21,25 @@ curl http://localhost:5227/api/reservations/stats/acme
 ```
 
 ## Key decisions / assumptions
-- **Exact limit, no slack:** request 101 in any rolling 60s is never admitted. The cost is DB writes per request, a deliberate trade of performance for accuracy.
-- **The database is the single source of truth** for the window state and the clock (one atomic check-and-insert). On SQLite this only holds on one host: SQLite's "now" is the app process's OS clock. Multi-instance behavior is tested with real separate processes sharing one file on one machine; different-machine behavior is out of scope because SQLite cannot span machines.
-- **Identity** is `(supplierId, reservationId)`; `updatedAtUtc` is the version. An older version with different details is ignored as `outofdate`.
-- **Throttle runs before validation**; every attributable request counts, throttled ones don't occupy the window.
-- **One transaction per request**, owned by the orchestrator: the throttle slot, reservation write and stats counter commit together, so stats can't drift after a crash. The apply step runs in a savepoint so a failing request still consumes its quota slot.
-- **Responses and stats share one vocabulary:** `ingested` (created/updated), `ignored` (duplicate/outofdate), `invalid` (400), `throttled` (429 + `Retry-After`). `invalid` counts every bad payload even when the request is also throttled (so a supplier sending garbage stays visible during a flood); invalid requests count toward the limit but never touch `reservations`.
+- **Exact limit, no slack.** Request 101 in any 60 seconds is never admitted.
+- **The database is the single source of truth** for the request count and the clock. Instances keep no counters or clocks of their own, so the limit stays exact across them.
+- **A reservation is identified by supplier and reservation ID, and `updatedAtUtc` is its version.** Suppliers may reuse IDs, and a delayed old retry must never overwrite newer data.
+- **Every request counts toward the limit, even invalid ones.** They still cost work, and a supplier sending garbage should be limited too. Rejected requests don't count.
+- **One transaction per request**, so the count, the data and the stats commit together and a crash can't leave them disagreeing.
+- **Responses and stats use the same four words**, so what a supplier is told matches what we count:
+  - **ingested**: a new or changed reservation was saved (201 / 200).
+  - **ignored**: nothing was saved, because it was a duplicate or an out-of-date update (200).
+  - **invalid**: the request was rejected because its data was bad (400).
+  - **throttled**: the supplier is over its limit (429, with the exact time to retry).
 
 ## Where I disagreed with / changed Claude Code's suggestions
 - **Clock.** Claude proposed each instance using its own clock and tolerating a little skew. I chose the database as the only clock, because the limit has to be exact.
 - **Cleanup.** Claude proposed deleting old rows on every request, then a cleanup job in every instance. I rejected both (extra writes, redundant work) and wanted one external cleaner; SQLite has no expiry or scheduler, so the in-service job stays as a compromise.
-- **Retry time.** Claude rounded it to whole seconds and could return 0 to a throttled caller, which invites an instant retry. I flagged the bad UX; fixing it exposed a race, so the time is now exact and always above zero (only the HTTP header rounds up, as HTTP requires).
-- **Stats.** Claude kept duplicates and out-of-date updates as separate counters. I merged them into one "ignored" bucket, made responses use the same words as the stats, and added an "invalid" counter (a throttled invalid request counts in both, for visibility).
+- **Retry time.** A throttled supplier could be told to retry after 0 seconds, which invites an immediate retry. I flagged it as bad UX, and the retry time is now exact and never zero.
+- **Stats.** Claude counted duplicates and out-of-date updates separately. I merged them into one "ignored" counter, added an "invalid" counter, and made responses use the same words as the stats.
 
 ## What I'd do differently with more time
-- **Redis (or similar) as the window store** instead of the DB: lower latency, atomic sliding window, native expiry, one shared clock, no load on the reservations DB. Not used because the assignment fixes the stack.
-- **Replace the in-service cleanup job with one external cleaner** (cron job or DB-side scheduler), so cleanup runs once rather than once per instance. With Redis this disappears entirely (native TTL).
-- **Scale writes with a dedicated writer service fed by a message broker.** SQLite allows one writer, so the service that writes would be a single, non-scaled consumer while the API tier scales; this moves the throttle verdict off the request path, so it needs a decision (request-reply, or 202 and report throttling another way). Out of scope here.
-- **Bound concurrent writers per instance.** Measured: SQLite has one writer, so throughput falls from ~355 req/s with 1 caller to ~54 with 32 (p99 over 5s), and a second server process adds nothing. A queue in front of the DB held ~375 req/s at 32 callers (6x) in an experiment; not implemented. Details in `plan.md`.
-- **Move the stats counters out of the request transaction on a server DB:** write a cheap event row in the same transaction (still exact after a crash) and aggregate the per-supplier counters asynchronously, so a hot supplier's counter row isn't updated on every request. On SQLite there is a single writer, so splitting would add a second lock acquisition and allow crash drift for no gain.
-- A server DB (e.g. SQL Server) with proper locking, per-supplier auth, per-IP limits, windowed stats.
+- **Keep the request window in a cache such as Redis, not in the database.** It keeps the per-request throttle writes off the database, and every instance shares one clock.
+- **Remove the cleanup job**, because the cache expires old entries by itself.
+- **Per-supplier authentication and per-IP limits**, so one caller can't use up another supplier's quota and requests that don't name a supplier are limited too.
+- **Replace SQLite with a server database.** SQLite allows only one writer at a time and can't be shared across machines, which caps how far the service can scale. I kept it because the assignment fixes the stack.
