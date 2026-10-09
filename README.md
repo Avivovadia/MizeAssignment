@@ -1,6 +1,6 @@
 # Supplier Feed Throttle & Dedup Service
 
-ASP.NET Core 8+ Web API + SQLite + Dapper. Dedupes supplier reservation updates and throttles suppliers (>100 requests / rolling 60s) across multiple instances. Full details: `plan.md`.
+ASP.NET Core 8+ Web API + SQLite + Dapper. Dedupes supplier reservation updates and throttles suppliers (>100 requests / rolling 60s) across multiple instances.
 
 ## Run it
 
